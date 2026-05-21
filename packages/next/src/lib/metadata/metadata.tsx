@@ -73,6 +73,7 @@ export function createMetadataComponents({
     // Gate metadata to the correct render stage. If the page is not
     // runtime-prefetchable, defer until the [Shell]Static stage so that
     // prefetchable segments get a head start.
+    // TODO(app-shells): disable this if we're not rendering any runtime content
     if (!isRuntimePrefetchable) {
       const workUnitStore = workUnitAsyncStorage.getStore()
       if (workUnitStore) {
@@ -126,6 +127,7 @@ export function createMetadataComponents({
     // Gate metadata to the correct render stage. If the page is not
     // runtime-prefetchable, defer until the [Shell]Static stage so that
     // prefetchable segments get a head start.
+    // TODO(app-shells): disable this if we're not rendering any runtime content
     if (!isRuntimePrefetchable) {
       const workUnitStore = workUnitAsyncStorage.getStore()
       if (workUnitStore) {
