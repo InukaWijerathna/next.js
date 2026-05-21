@@ -62,9 +62,10 @@ use tokio::{
 use tracing::Instrument;
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{
-    Completion, Effect, EffectStateStorage, InvalidationReason, NonLocalValue, ReadRef, ResolvedVc,
-    TaskInput, TurboTasksApi, ValueToString, ValueToStringRef, Vc, debug::ValueDebugFormat,
-    emit_effect, parallel, spawn, trace::TraceRawVcs, turbo_tasks_weak, turbobail, turbofmt,
+    CapturedEffect, Completion, Effect, EffectStateStorage, InvalidationReason, NonLocalValue,
+    ReadRef, ResolvedVc, TaskInput, TurboTasksApi, ValueToString, ValueToStringRef, Vc,
+    debug::ValueDebugFormat, emit_effect, parallel, spawn, trace::TraceRawVcs, turbo_tasks_weak,
+    turbobail, turbofmt,
 };
 use turbo_tasks_hash::{
     DeterministicHash, DeterministicHasher, HashAlgorithm, deterministic_hash, hash_xxh3_hash64,
@@ -916,7 +917,7 @@ impl FileSystem for DiskFileSystem {
     }
 
     #[turbo_tasks::function(fs)]
-    async fn write(&self, fs_path: FileSystemPath, content: Vc<FileContent>) -> Result<()> {
+    async fn write(&self, fs_path: FileSystemPath, content: ResolvedVc<FileContent>) -> Result<()> {
         // You might be tempted to use `session_dependent` here, but `write` purely declares a side
         // effect and does not need to be reexecuted in the next session. All side effects are
         // reexecuted in general.
@@ -926,27 +927,62 @@ impl FileSystem for DiskFileSystem {
             turbobail!("Cannot write to denied path: {fs_path}");
         }
         let full_path = self.to_sys_path(&fs_path);
+        let inner = self.inner.clone();
 
         // Persist the file content so it is stored in the persistent cache.
         // Since FileContent uses serialization = "hash", persisting it here ensures the full
         // content is available in the persistent cache (via PersistedFileContent) and does not
         // require recomputing the content on cache restore — avoiding unnecessary downstream
         // recomputation.
-        let content = content.persist().await?;
-
-        let inner = self.inner.clone();
+        let content = content.persist().to_resolved().await?;
+        let content_hash = u128::from_le_bytes(hash_xxh3_hash128(&*content.await?));
 
         #[derive(TraceRawVcs, NonLocalValue, Clone)]
         struct WriteEffect {
             full_path: Arc<PathBuf>,
             inner: Arc<DiskFileSystemInner>,
-            content: ReadRef<PersistedFileContent>,
+            content: ResolvedVc<PersistedFileContent>,
             content_hash: u128,
         }
 
         impl Effect for WriteEffect {
-            type Error = AnyhowWrapper;
+            type Captured = CapturedWriteEffect;
 
+            async fn capture(&self) -> Result<CapturedWriteEffect> {
+                // If the per-key effect state already records `Applied { value_hash }` matching
+                // our hash, skip materializing the content (avoids a possible disk read +
+                // decompression via the persistent cache). The apply-time state machine will
+                // dedup-hit before touching content. If state diverged between this read and
+                // apply, `Effects::apply` will fire our producer's invalidator via the Retry
+                // pathway and the producer will rerun with a fresh capture.
+                let key_bytes: Box<[u8]> = self.full_path.as_os_str().as_encoded_bytes().into();
+                let content = if self
+                    .inner
+                    .effect_state_storage
+                    .matches_applied(&key_bytes, self.content_hash)
+                {
+                    None
+                } else {
+                    Some(self.content.await?)
+                };
+                Ok(CapturedWriteEffect {
+                    full_path: self.full_path.clone(),
+                    inner: self.inner.clone(),
+                    content,
+                    content_hash: self.content_hash,
+                })
+            }
+        }
+
+        #[derive(TraceRawVcs, NonLocalValue, Clone)]
+        struct CapturedWriteEffect {
+            full_path: Arc<PathBuf>,
+            inner: Arc<DiskFileSystemInner>,
+            content: Option<ReadRef<PersistedFileContent>>,
+            content_hash: u128,
+        }
+
+        impl CapturedEffect for CapturedWriteEffect {
             fn key(&self) -> Box<[u8]> {
                 self.full_path.as_os_str().as_encoded_bytes().into()
             }
@@ -955,19 +991,37 @@ impl FileSystem for DiskFileSystem {
                 self.content_hash
             }
 
-            fn state_storage(&self) -> &EffectStateStorage {
-                &self.inner.effect_state_storage
-            }
-
-            async fn apply(&self) -> Result<(), AnyhowWrapper> {
-                spawn(self.clone().apply_inner())
+            async fn apply(&self) -> Result<(), turbo_tasks::ApplyOutcome> {
+                // Run the actual write on its own spawned task so that multiple pending write
+                // effects can execute in parallel rather than serially on the caller's future
+                // (see #94140). The `run_apply` state machine still coordinates dedup and
+                // in-progress waiters on the caller's future.
+                let body = self.content.as_ref().map(|content| {
+                    let cloned = self.clone();
+                    let content = content.clone();
+                    move || async move { spawn(cloned.apply_inner(content)).await }
+                });
+                self.inner
+                    .effect_state_storage
+                    .run_apply::<AnyhowWrapper, _, _>(self.key(), self.content_hash, body)
                     .await
-                    .map_err(AnyhowWrapper::from)
             }
         }
 
-        impl WriteEffect {
-            async fn apply_inner(self) -> anyhow::Result<()> {
+        impl CapturedWriteEffect {
+            async fn apply_inner(
+                self,
+                content: ReadRef<PersistedFileContent>,
+            ) -> Result<(), AnyhowWrapper> {
+                self.apply_inner_anyhow(&content)
+                    .await
+                    .map_err(AnyhowWrapper::from)
+            }
+
+            async fn apply_inner_anyhow(
+                &self,
+                content: &ReadRef<PersistedFileContent>,
+            ) -> anyhow::Result<()> {
                 let full_path = validate_path_length(&self.full_path)?;
 
                 let _lock = self.inner.lock_path(&full_path).await;
@@ -977,8 +1031,7 @@ impl FileSystem for DiskFileSystem {
                 // be freed immediately. Given this is an output file, it's unlikely any Turbo
                 // code will need to read the file from disk into a Vc<FileContent>, so we're
                 // not wasting cycles.
-                let compare = self
-                    .content
+                let compare = content
                     .streaming_compare(&full_path)
                     .instrument(tracing::info_span!("read file before write", name = ?full_path))
                     .concurrency_limited(&self.inner.read_semaphore)
@@ -987,9 +1040,9 @@ impl FileSystem for DiskFileSystem {
                     return Ok(());
                 }
 
-                match &*self.content {
+                match &**content {
                     PersistedFileContent::Content(..) => {
-                        let content = self.content.clone();
+                        let content = content.clone();
                         let full_path = full_path.into_owned();
                         async {
                             let do_write = || {
@@ -1086,7 +1139,6 @@ impl FileSystem for DiskFileSystem {
             }
         }
 
-        let content_hash = u128::from_le_bytes(hash_xxh3_hash128(&*content));
         emit_effect(WriteEffect {
             full_path: Arc::new(full_path),
             inner,
@@ -1098,7 +1150,11 @@ impl FileSystem for DiskFileSystem {
     }
 
     #[turbo_tasks::function(fs)]
-    async fn write_link(&self, fs_path: FileSystemPath, target: Vc<LinkContent>) -> Result<()> {
+    async fn write_link(
+        &self,
+        fs_path: FileSystemPath,
+        target: ResolvedVc<LinkContent>,
+    ) -> Result<()> {
         // You might be tempted to use `session_dependent` here, but we purely declare a side
         // effect and does not need to be re-executed in the next session. All side effects are
         // re-executed in general.
@@ -1107,23 +1163,53 @@ impl FileSystem for DiskFileSystem {
         if self.inner.is_path_denied(&fs_path) {
             turbobail!("Cannot write link to denied path: {fs_path}");
         }
-
-        let content = target.await?;
-
         let full_path = self.to_sys_path(&fs_path);
         let inner = self.inner.clone();
 
-        #[derive(TraceRawVcs, NonLocalValue, Clone)]
+        let content_hash = u128::from_le_bytes(hash_xxh3_hash128(&*target.await?));
+
+        #[derive(TraceRawVcs, NonLocalValue)]
         struct WriteLinkEffect {
             full_path: Arc<PathBuf>,
             inner: Arc<DiskFileSystemInner>,
-            content: ReadRef<LinkContent>,
+            target: ResolvedVc<LinkContent>,
             content_hash: u128,
         }
 
         impl Effect for WriteLinkEffect {
-            type Error = AnyhowWrapper;
+            type Captured = CapturedWriteLinkEffect;
 
+            async fn capture(&self) -> Result<CapturedWriteLinkEffect> {
+                // Skip target materialization if the per-key effect state already records
+                // `Applied { value_hash }` matching our hash. See `WriteEffect::capture`.
+                let key_bytes: Box<[u8]> = self.full_path.as_os_str().as_encoded_bytes().into();
+                let content = if self
+                    .inner
+                    .effect_state_storage
+                    .matches_applied(&key_bytes, self.content_hash)
+                {
+                    None
+                } else {
+                    Some(self.target.await?)
+                };
+                Ok(CapturedWriteLinkEffect {
+                    full_path: self.full_path.clone(),
+                    inner: self.inner.clone(),
+                    content,
+                    content_hash: self.content_hash,
+                })
+            }
+        }
+
+        #[derive(TraceRawVcs, NonLocalValue, Clone)]
+        struct CapturedWriteLinkEffect {
+            full_path: Arc<PathBuf>,
+            inner: Arc<DiskFileSystemInner>,
+            content: Option<ReadRef<LinkContent>>,
+            content_hash: u128,
+        }
+
+        impl CapturedEffect for CapturedWriteLinkEffect {
             fn key(&self) -> Box<[u8]> {
                 self.full_path.as_os_str().as_encoded_bytes().into()
             }
@@ -1132,19 +1218,33 @@ impl FileSystem for DiskFileSystem {
                 self.content_hash
             }
 
-            fn state_storage(&self) -> &EffectStateStorage {
-                &self.inner.effect_state_storage
-            }
-
-            async fn apply(&self) -> Result<(), AnyhowWrapper> {
-                spawn(self.clone().apply_inner())
+            async fn apply(&self) -> Result<(), turbo_tasks::ApplyOutcome> {
+                // Run the actual symlink write on its own spawned task so multiple pending
+                // effects can execute in parallel (see #94140). The `run_apply` state machine
+                // still coordinates dedup and in-progress waiters on the caller's future.
+                let body = self.content.as_ref().map(|content| {
+                    let cloned = self.clone();
+                    let content = content.clone();
+                    move || async move { spawn(cloned.apply_inner(content)).await }
+                });
+                self.inner
+                    .effect_state_storage
+                    .run_apply::<AnyhowWrapper, _, _>(self.key(), self.content_hash, body)
                     .await
-                    .map_err(AnyhowWrapper::from)
             }
         }
 
-        impl WriteLinkEffect {
-            async fn apply_inner(self) -> anyhow::Result<()> {
+        impl CapturedWriteLinkEffect {
+            async fn apply_inner(self, content: ReadRef<LinkContent>) -> Result<(), AnyhowWrapper> {
+                self.apply_inner_anyhow(&content)
+                    .await
+                    .map_err(AnyhowWrapper::from)
+            }
+
+            async fn apply_inner_anyhow(
+                &self,
+                content: &ReadRef<LinkContent>,
+            ) -> anyhow::Result<()> {
                 let full_path = validate_path_length(&self.full_path)?;
 
                 let _lock = self.inner.lock_path(&full_path).await;
@@ -1159,7 +1259,7 @@ impl FileSystem for DiskFileSystem {
                     Invalid,
                 }
 
-                let os_specific_link_content = match &*self.content {
+                let os_specific_link_content = match &**content {
                     LinkContent::Link { target, link_type } => {
                         let is_directory = link_type.contains(LinkType::DIRECTORY);
                         let target_path = if link_type.contains(LinkType::ABSOLUTE) {
@@ -1369,11 +1469,10 @@ impl FileSystem for DiskFileSystem {
             }
         }
 
-        let content_hash = u128::from_le_bytes(hash_xxh3_hash128(&*content));
         emit_effect(WriteLinkEffect {
             full_path: Arc::new(full_path),
             inner,
-            content,
+            target,
             content_hash,
         });
         Ok(())
@@ -3161,7 +3260,7 @@ mod tests {
 
         use rand::{RngExt, SeedableRng};
         use turbo_rcstr::{RcStr, rcstr};
-        use turbo_tasks::{ResolvedVc, Vc};
+        use turbo_tasks::{ResolvedVc, Vc, read_strongly_consistent_and_apply_effects};
         use turbo_tasks_backend::{BackendOptions, TurboTasksBackend, noop_backing_storage};
 
         use super::extract_effects_operation;
@@ -3233,14 +3332,14 @@ mod tests {
                     .await?;
                 let root_path = disk_file_system_root(fs);
 
-                extract_effects_operation(test_write_link_effect_operation(
-                    fs,
-                    root_path.clone(),
-                    rcstr!("subdir-a"),
-                ))
-                .read_strongly_consistent()
-                .await?
-                .apply()
+                read_strongly_consistent_and_apply_effects(
+                    extract_effects_operation(test_write_link_effect_operation(
+                        fs,
+                        root_path.clone(),
+                        rcstr!("subdir-a"),
+                    )),
+                    |e| e,
+                )
                 .await?;
 
                 assert_eq!(read_to_string(path.join("symlink-file")).unwrap(), "foo");
@@ -3250,14 +3349,14 @@ mod tests {
                 );
 
                 // Write the same links again but with different targets
-                extract_effects_operation(test_write_link_effect_operation(
-                    fs,
-                    root_path,
-                    rcstr!("subdir-b"),
-                ))
-                .read_strongly_consistent()
-                .await?
-                .apply()
+                read_strongly_consistent_and_apply_effects(
+                    extract_effects_operation(test_write_link_effect_operation(
+                        fs,
+                        root_path,
+                        rcstr!("subdir-b"),
+                    )),
+                    |e| e,
+                )
                 .await?;
 
                 assert_eq!(read_to_string(path.join("symlink-file")).unwrap(), "bar");
@@ -3348,14 +3447,14 @@ mod tests {
 
                 let initial_updates: Vec<(usize, usize)> =
                     (0..STRESS_SYMLINK_COUNT).map(|i| (i, 0)).collect();
-                extract_effects_operation(write_symlink_stress_batch(
-                    fs,
-                    symlinks_dir.clone(),
-                    initial_updates,
-                ))
-                .read_strongly_consistent()
-                .await?
-                .apply()
+                read_strongly_consistent_and_apply_effects(
+                    extract_effects_operation(write_symlink_stress_batch(
+                        fs,
+                        symlinks_dir.clone(),
+                        initial_updates,
+                    )),
+                    |e| e,
+                )
                 .await?;
 
                 let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
@@ -3368,14 +3467,14 @@ mod tests {
                     }
                     let updates: Vec<(usize, usize)> = updates_map.into_iter().collect();
 
-                    extract_effects_operation(write_symlink_stress_batch(
-                        fs,
-                        symlinks_dir.clone(),
-                        updates,
-                    ))
-                    .read_strongly_consistent()
-                    .await?
-                    .apply()
+                    read_strongly_consistent_and_apply_effects(
+                        extract_effects_operation(write_symlink_stress_batch(
+                            fs,
+                            symlinks_dir.clone(),
+                            updates,
+                        )),
+                        |e| e,
+                    )
                     .await?;
                 }
 
@@ -3398,7 +3497,7 @@ mod tests {
         };
 
         use turbo_rcstr::{RcStr, rcstr};
-        use turbo_tasks::{Effects, Vc, take_effects};
+        use turbo_tasks::{Effects, Vc, read_strongly_consistent_and_apply_effects, take_effects};
         use turbo_tasks_backend::{BackendOptions, TurboTasksBackend, noop_backing_storage};
 
         use crate::{
@@ -3724,15 +3823,13 @@ mod tests {
                 const TEST_CONTENT: &str = "test content";
 
                 // Test 1: Writing to allowed directory should work
-                let effects = write_allowed_file_operation(
+                let effects_op = write_allowed_file_operation(
                     root.clone(),
                     denied_path.clone(),
                     RcStr::from(ALLOWED_FILE),
                     RcStr::from(TEST_CONTENT),
-                )
-                .read_strongly_consistent()
-                .await?;
-                effects.apply().await?;
+                );
+                read_strongly_consistent_and_apply_effects(effects_op, |e| e).await?;
 
                 // Verify the file was written to disk
                 let content = read_to_string(Path::new(root.as_str()).join(ALLOWED_FILE))?;
