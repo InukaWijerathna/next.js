@@ -2057,6 +2057,7 @@ export const defaultConfig = Object.freeze({
     turbopackFileSystemCacheForBuild: false,
     turbopackInferModuleSideEffects: true,
     turbopackPluginRuntimeStrategy: 'childProcesses',
+    durableUseCacheEntries: true,
   },
   htmlLimitedBots: undefined,
   bundlePagesRouterDependencies: false,
