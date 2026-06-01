@@ -302,7 +302,7 @@ fn root_identifier(expr: &Expr) -> Option<&Ident> {
 /// is an  identifier, not a literal. This is to prevent us from marking
 /// assignments to aliased variables as side-effect free. For example:
 ///
-/// ```
+/// ```javascript
 /// const c = globalThis;
 /// c.fetch = sideEffects();
 /// ```
