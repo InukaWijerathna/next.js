@@ -266,55 +266,19 @@ async function createGitHubReleaseCommit(token) {
   const localReleaseSha = await git(['rev-parse', 'HEAD'], {
     captureOutput: true,
   })
-  const baseSha = await getSingleParent(localReleaseSha)
-  const tagName = await getLocalReleaseTagName(localReleaseSha)
-  const message = await git(['log', '-1', '--pretty=%B'], {
-    captureOutput: true,
-  })
-
-  console.log(
-    `Creating GitHub-signed release commit for ${tagName} from local Lerna commit ${localReleaseSha}`
-  )
-
-  const treeSha = await createTreeFromLocalCommit({
-    token,
-    baseSha,
-    localReleaseSha,
-  })
-  const commit = await githubRequest(
-    token,
-    'POST',
-    `${REPO_API_PATH}/git/commits`,
-    {
-      message,
-      tree: treeSha,
-      parents: [baseSha],
-    }
-  )
-
-  if (!commit.verification?.verified) {
-    throw new Error(
-      `GitHub API created unsigned release commit ${commit.sha}: ${commit.verification?.reason}`
-    )
-  }
-
+  const tagName = 'v16.2.8'
   let createdTag = false
 
   try {
+    console.log(`Tagging ${localReleaseSha} with ${tagName}`)
     await githubRequest(token, 'POST', `${REPO_API_PATH}/git/refs`, {
       ref: `refs/tags/${tagName}`,
-      sha: commit.sha,
+      sha: localReleaseSha,
     })
     createdTag = true
 
-    await githubRequest(
-      token,
-      'PATCH',
-      `${REPO_API_PATH}/git/refs/heads/${branch}`,
-      {
-        sha: commit.sha,
-        force: false,
-      }
+    throw new Error(
+      `Should have pushed ${localReleaseSha} to ${branch} but aborted due to dry run`
     )
   } catch (error) {
     if (createdTag) {
@@ -331,15 +295,9 @@ async function createGitHubReleaseCommit(token) {
     throw error
   }
 
-  await alignLocalBranchWithGitHubReleaseCommit(branch, tagName, commit.sha)
-
-  console.log(
-    `Created GitHub-signed release commit ${commit.sha} and tag ${tagName}`
-  )
-
   return {
     branch,
-    sha: commit.sha,
+    sha: localReleaseSha,
     tagName,
   }
 }
