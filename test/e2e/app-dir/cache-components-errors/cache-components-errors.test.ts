@@ -3311,7 +3311,7 @@ Learn more: https://nextjs.org/docs/messages/blocking-route`
                      ],
                    },
                  ],
-                 "code": "E394",
+                 "code": "E1307",
                  "description": "A nested \`"use cache"\` with a short \`expire\` (under 5 minutes) is inside an outer \`"use cache"\` that has no \`cacheLife()\`. Add \`cacheLife()\` to the outer one to choose: a longer \`expire\` to prerender it, or a short \`expire\` to keep it dynamic.
                Learn more: https://nextjs.org/docs/messages/nested-use-cache-no-explicit-cachelife",
                  "environmentLabel": "Server",
@@ -3719,7 +3719,7 @@ Learn more: https://nextjs.org/docs/messages/blocking-route`
                      ],
                    },
                  ],
-                 "code": "E394",
+                 "code": "E1308",
                  "description": "A nested \`"use cache"\` with \`revalidate: 0\` is inside an outer \`"use cache"\` that has no \`cacheLife()\`. Add \`cacheLife()\` to the outer one to choose: a non-zero \`revalidate\` to prerender it, or \`revalidate: 0\` to keep it dynamic.
                Learn more: https://nextjs.org/docs/messages/nested-use-cache-no-explicit-cachelife",
                  "environmentLabel": "Server",

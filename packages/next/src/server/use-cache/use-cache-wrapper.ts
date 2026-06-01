@@ -64,11 +64,11 @@ import {
   UseCacheTimeoutError,
 } from './use-cache-errors'
 import {
+  createNestedCacheShortExpireError,
+  createNestedCacheZeroRevalidateError,
   createUseCachePrivateInsidePublicUseCacheError,
   createUseCachePrivateInsideUnstableCacheError,
   createUseCachePrivateOutsideRequestContextError,
-  nestedCacheShortExpireErrorMessage,
-  nestedCacheZeroRevalidateErrorMessage,
 } from './use-cache-messages'
 import {
   createHangingInputAbortSignal,
@@ -2037,9 +2037,9 @@ export async function cache(
               if (rdcResult.entry.revalidate === 0) {
                 if (rdcResult.hasExplicitRevalidate === false) {
                   throw wrapAsInvalidDynamicUsageError(
-                    new Error(nestedCacheZeroRevalidateErrorMessage, {
-                      cause: rdcResult.dynamicNestedCacheError,
-                    })
+                    createNestedCacheZeroRevalidateError(
+                      rdcResult.dynamicNestedCacheError
+                    )
                   )
                 }
                 debug?.(
@@ -2050,9 +2050,9 @@ export async function cache(
               } else {
                 if (rdcResult.hasExplicitExpire === false) {
                   throw wrapAsInvalidDynamicUsageError(
-                    new Error(nestedCacheShortExpireErrorMessage, {
-                      cause: rdcResult.dynamicNestedCacheError,
-                    })
+                    createNestedCacheShortExpireError(
+                      rdcResult.dynamicNestedCacheError
+                    )
                   )
                 }
                 debug?.(
@@ -2089,9 +2089,9 @@ export async function cache(
                   rdcResult.hasExplicitRevalidate === false
                 ) {
                   throw wrapAsInvalidDynamicUsageError(
-                    new Error(nestedCacheZeroRevalidateErrorMessage, {
-                      cause: rdcResult.dynamicNestedCacheError,
-                    })
+                    createNestedCacheZeroRevalidateError(
+                      rdcResult.dynamicNestedCacheError
+                    )
                   )
                 }
                 if (
@@ -2099,9 +2099,9 @@ export async function cache(
                   rdcResult.hasExplicitExpire === false
                 ) {
                   throw wrapAsInvalidDynamicUsageError(
-                    new Error(nestedCacheShortExpireErrorMessage, {
-                      cause: rdcResult.dynamicNestedCacheError,
-                    })
+                    createNestedCacheShortExpireError(
+                      rdcResult.dynamicNestedCacheError
+                    )
                   )
                 }
                 // We delay the cache here so that it doesn't resolve in the static task --

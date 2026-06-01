@@ -16,9 +16,6 @@ const NEXT_REQUEST_IN_USE_CACHE =
 const UNSTABLE_CACHE_API_DOCS =
   'https://nextjs.org/docs/app/api-reference/functions/unstable_cache'
 
-const NESTED_USE_CACHE_NO_EXPLICIT_CACHELIFE =
-  'https://nextjs.org/docs/messages/nested-use-cache-no-explicit-cachelife'
-
 const REVALIDATING_GUIDE_DOCS =
   'https://nextjs.org/docs/app/getting-started/revalidating'
 
@@ -164,15 +161,29 @@ export function createCacheLifeOutsideUseCacheError(): Error {
 
 // ── Nested `"use cache"` without outer `cacheLife()` ──────────────
 
-export const nestedCacheZeroRevalidateErrorMessage =
-  `A nested \`"use cache"\` with \`revalidate: 0\` is inside an outer \`"use cache"\` that has no \`cacheLife()\`. ` +
-  `Add \`cacheLife()\` to the outer one to choose: a non-zero \`revalidate\` to prerender it, or \`revalidate: 0\` to keep it dynamic.\n` +
-  `Learn more: ${NESTED_USE_CACHE_NO_EXPLICIT_CACHELIFE}`
+/**
+ * Factories (not exported strings) so the error-code tool can statically
+ * match the message at the `new Error("…")` call site and keep the stable
+ * E1244 / E1245 entries in `errors.json`. The chained `NestedDynamicUseCacheError`
+ * captured at the inner `"use cache"` is passed as `cause`.
+ */
+export function createNestedCacheZeroRevalidateError(
+  cause: Error | undefined
+): Error {
+  return new Error(
+    `A nested \`"use cache"\` with \`revalidate: 0\` is inside an outer \`"use cache"\` that has no \`cacheLife()\`. Add \`cacheLife()\` to the outer one to choose: a non-zero \`revalidate\` to prerender it, or \`revalidate: 0\` to keep it dynamic.\nLearn more: https://nextjs.org/docs/messages/nested-use-cache-no-explicit-cachelife`,
+    { cause }
+  )
+}
 
-export const nestedCacheShortExpireErrorMessage =
-  `A nested \`"use cache"\` with a short \`expire\` (under 5 minutes) is inside an outer \`"use cache"\` that has no \`cacheLife()\`. ` +
-  `Add \`cacheLife()\` to the outer one to choose: a longer \`expire\` to prerender it, or a short \`expire\` to keep it dynamic.\n` +
-  `Learn more: ${NESTED_USE_CACHE_NO_EXPLICIT_CACHELIFE}`
+export function createNestedCacheShortExpireError(
+  cause: Error | undefined
+): Error {
+  return new Error(
+    `A nested \`"use cache"\` with a short \`expire\` (under 5 minutes) is inside an outer \`"use cache"\` that has no \`cacheLife()\`. Add \`cacheLife()\` to the outer one to choose: a longer \`expire\` to prerender it, or a short \`expire\` to keep it dynamic.\nLearn more: https://nextjs.org/docs/messages/nested-use-cache-no-explicit-cachelife`,
+    { cause }
+  )
+}
 
 // ── `"use cache: private"` placement errors ───────────────────────
 
