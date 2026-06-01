@@ -20,6 +20,10 @@ import { StaticGenBailoutError } from '../../client/components/static-generation
 import { DynamicServerError } from '../../client/components/hooks-server-context'
 import { InvariantError } from '../../shared/lib/invariant-error'
 import { delayUntilRuntimeStage } from '../dynamic-rendering-utils'
+import {
+  createDraftModeMutationInUseCacheError,
+  createDraftModeMutationInUnstableCacheError,
+} from '../use-cache/use-cache-messages'
 import { ReflectAdapter } from '../web/spec-extension/adapters/reflect'
 import { applyOwnerStack } from '../dynamic-rendering-utils'
 
@@ -203,8 +207,9 @@ function trackDynamicDraftMode(expression: string, constructorOpt: Function) {
       switch (workUnitStore.type) {
         case 'cache':
         case 'private-cache': {
-          const error = new Error(
-            `Route ${workStore.route} used "${expression}" inside "use cache". The enabled status of \`draftMode()\` can be read in caches but you must not enable or disable \`draftMode()\` inside a cache. See more info here: https://nextjs.org/docs/messages/next-request-in-use-cache`
+          const error = createDraftModeMutationInUseCacheError(
+            workStore.route,
+            expression
           )
           Error.captureStackTrace(error, constructorOpt)
           applyOwnerStack(error)
@@ -212,8 +217,9 @@ function trackDynamicDraftMode(expression: string, constructorOpt: Function) {
           throw error
         }
         case 'unstable-cache':
-          throw new Error(
-            `Route ${workStore.route} used "${expression}" inside a function cached with \`unstable_cache()\`. The enabled status of \`draftMode()\` can be read in caches but you must not enable or disable \`draftMode()\` inside a cache. See more info here: https://nextjs.org/docs/app/api-reference/functions/unstable_cache`
+          throw createDraftModeMutationInUnstableCacheError(
+            workStore.route,
+            expression
           )
 
         case 'prerender':
