@@ -116,6 +116,7 @@ impl MiddlewareEndpoint {
             module.ident(),
             ChunkGroup::Entry(vec![module]),
             module_graph,
+            OutputAssets::empty(),
             AvailabilityInfo::root(),
         );
         Ok(edge_chunk_grou)
@@ -183,14 +184,20 @@ impl MiddlewareEndpoint {
                         source.insert_str(0, "/:nextInternalLocale((?!_next/)[^/.]{1,})");
                     }
 
+                    // Match transport-specific route forms that resolve to the
+                    // same page:
+                    // - Pages Router data routes: /_next/data/<build-id>/...
+                    // - App Router transport routes: .rsc, ...segments/...segment.rsc
                     if is_root {
                         source.push('(');
                         if has_i18n {
-                            source.push_str("|\\\\.json|");
+                            source.push_str("|\\.json|");
                         }
-                        source.push_str("/?index|/?index\\\\.json)?")
+                        source.push_str("/?index|/?index\\.json|");
+                        source.push_str("/?index(?:\\.rsc|\\.segments/.+\\.segment\\.rsc)");
+                        source.push_str(")?");
                     } else {
-                        source.push_str("{(\\\\.json)}?")
+                        source.push_str("{(\\.json|\\.rsc|\\.segments/.+\\.segment\\.rsc)}?");
                     };
 
                     source.insert_str(0, "/:nextData(_next/data/[^/]{1,})?");
@@ -220,10 +227,18 @@ impl MiddlewareEndpoint {
             let chunk = self.node_chunk().to_resolved().await?;
             let mut output_assets = vec![chunk];
             if this.project.next_mode().await?.is_production() {
+                let userland_module = self.entry_module();
                 output_assets.push(ResolvedVc::upcast(
-                    NftJsonAsset::new(*this.project, None, *chunk, vec![])
-                        .to_resolved()
-                        .await?,
+                    NftJsonAsset::new(
+                        *this.project,
+                        None,
+                        *chunk,
+                        vec![],
+                        this.project.module_graph(userland_module),
+                        vec![userland_module],
+                    )
+                    .to_resolved()
+                    .await?,
                 ));
             }
             let middleware_manifest_v2 = MiddlewaresManifestV2 {
@@ -257,7 +272,7 @@ impl MiddlewareEndpoint {
             let edge_assets = edge_chunk_group_ref.assets.await?;
 
             let file_paths_from_root =
-                get_js_paths_from_root(&node_root_value, &edge_assets).await?;
+                get_js_paths_from_root(&node_root_value, edge_assets.iter().copied()).await?;
             let entrypoint_asset = *edge_assets
                 .last()
                 .context("expected assets for edge middleware endpoint")?;
@@ -272,7 +287,7 @@ impl MiddlewareEndpoint {
                 get_wasm_paths_from_root(&node_root_value, edge_all_assets.await?).await?;
 
             let all_assets =
-                get_asset_paths_from_root(&node_root_value, &edge_all_assets.await?).await?;
+                get_asset_paths_from_root(&node_root_value, edge_all_assets.await?).await?;
 
             let regions = if let Some(regions) = config.preferred_region.as_ref() {
                 if regions.len() == 1 {

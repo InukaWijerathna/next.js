@@ -7,6 +7,8 @@ use tracing::Span;
 use turbo_bincode::{AnyDecodeFn, AnyEncodeFn, new_hash_encoder};
 use turbo_tasks_hash::DeterministicHasher;
 
+#[cfg(feature = "task_dirty_cause")]
+use crate::TaskDirtyCause;
 use crate::{
     RawVc, TaskExecutionReason, TaskInput, TaskPersistence, TaskPriority,
     dyn_task_inputs::{
@@ -215,6 +217,11 @@ pub struct NativeFunction {
     /// Whether this function's tasks should be treated as root nodes in the aggregation graph.
     /// Root tasks start with aggregation number `u32::MAX` on initial creation.
     pub is_root: bool,
+
+    /// Whether this function's tasks are session dependent. Session dependent tasks are
+    /// re-executed when restored from persistent cache because they depend on external state
+    /// (filesystem, environment, network) that may change between sessions.
+    pub is_session_dependent: bool,
 }
 
 impl Debug for NativeFunction {
@@ -241,6 +248,7 @@ impl NativeFunction {
         implementation: &into_task_fn(default_fn) as &dyn TaskFn,
         ty: RegistryType::new::<()>("", ""),
         is_root: false,
+        is_session_dependent: false,
     };
 
     pub const fn new<T: TaskFn>(
@@ -249,12 +257,14 @@ impl NativeFunction {
         arg_meta: ArgMeta,
         implementation: &'static T,
         is_root: bool,
+        is_session_dependent: bool,
     ) -> Self {
         Self {
             ty: RegistryType::new::<T>(name, global_name),
             arg_meta,
             implementation,
             is_root,
+            is_session_dependent,
         }
     }
 
@@ -277,18 +287,33 @@ impl NativeFunction {
         persistence: TaskPersistence,
         reason: TaskExecutionReason,
         priority: TaskPriority,
+        #[cfg(feature = "task_dirty_cause")] cause: Option<&TaskDirtyCause>,
     ) -> Span {
         let flags = match persistence {
             TaskPersistence::Persistent => "",
             TaskPersistence::Transient => "transient",
         };
-        tracing::trace_span!(
-            "turbo_tasks::function",
-            name = self.ty.name,
-            priority = %priority,
-            flags = flags,
-            reason = reason.as_str()
-        )
+        #[cfg(feature = "task_dirty_cause")]
+        {
+            tracing::trace_span!(
+                "turbo_tasks::function",
+                name = self.ty.name,
+                priority = %priority,
+                flags = flags,
+                reason = reason.as_str(),
+                cause = cause.map(tracing::field::display),
+            )
+        }
+        #[cfg(not(feature = "task_dirty_cause"))]
+        {
+            tracing::trace_span!(
+                "turbo_tasks::function",
+                name = self.ty.name,
+                priority = %priority,
+                flags = flags,
+                reason = reason.as_str(),
+            )
+        }
     }
 
     pub fn resolve_span(&'static self, priority: TaskPriority) -> Span {

@@ -1,5 +1,6 @@
 import { nextTestSetup } from 'e2e-utils'
 import {
+  expectBuildValidationSkipped,
   expectNoBuildValidationErrors,
   extractBuildValidationError,
   parseValidationMessages,
@@ -63,13 +64,13 @@ describe('instant-validation-build', () => {
         )
         expect(extractBuildValidationError(result.cliOutput))
           .toMatchInlineSnapshot(`
-         "Error: Route "/invalid-missing-suspense-around-runtime": Next.js encountered uncached data during the initial render.
+         "Error: Route "/invalid-missing-suspense-around-runtime": Next.js encountered uncached data during prerendering or a navigation.
 
-         \`fetch(...)\` or \`connection()\` accessed outside of \`<Suspense>\` blocks navigation, leading to a slower user experience.
+         \`fetch(...)\` or \`connection()\` accessed outside of \`<Suspense>\` prevents the route from being prerendered or the navigation from being instant, leading to a slower user experience.
 
          Ways to fix this:
            - Cache the data access with \`"use cache"\`
-           - Move the data access into a child component within a <Suspense> boundary
+           - Provide a placeholder with \`<Suspense fallback={...}>\` around the data access
            - Set \`export const instant = false\` to allow a blocking route
 
          Learn more: https://nextjs.org/docs/messages/blocking-route
@@ -950,6 +951,14 @@ describe('instant-validation-build', () => {
         '/(default)/valid-await-cache-without-suspense/private'
       )
       expectNoBuildValidationErrors(result)
+    })
+
+    it('valid - a page with "use cache" and `unstable_instant = false` still prerenders as a fully static shell', async () => {
+      const result = await prerender('/(instant-false-static)/use-cache')
+      expectBuildValidationSkipped(result)
+      // A fully static shell is non-empty and contains the closing </html> tag.
+      const html = await next.readFile('.next/server/app/use-cache.html')
+      expect(html).toContain('</html>')
     })
   })
 })
