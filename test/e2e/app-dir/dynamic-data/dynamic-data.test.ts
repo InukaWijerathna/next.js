@@ -378,13 +378,13 @@ describe('dynamic-data inside cache scope', () => {
         // We expect this to fail
       }
       expect(next.cliOutput).toMatch(
-        'Error: Route /cookies used `cookies()` inside a function cached with `unstable_cache()`.'
+        'Error: Route "/cookies": `cookies()` can\'t be read inside `unstable_cache()`. Read it outside the cached function and pass what you need as an argument.'
       )
       expect(next.cliOutput).toMatch(
-        'Error: Route /connection used `connection()` inside a function cached with `unstable_cache()`.'
+        'Error: Route "/connection": `connection()` can\'t be used inside `unstable_cache()`. A cache entry can be built before any request exists, so it can\'t depend on one.'
       )
       expect(next.cliOutput).toMatch(
-        'Error: Route /headers used `headers()` inside a function cached with `unstable_cache()`.'
+        'Error: Route "/headers": `headers()` can\'t be read inside `unstable_cache()`. Read it outside the cached function and pass what you need as an argument.'
       )
     })
   }
