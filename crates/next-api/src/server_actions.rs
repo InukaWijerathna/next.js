@@ -38,7 +38,6 @@ use turbopack_core::{
     module::Module,
     module_graph::{GraphTraversalAction, ModuleGraph, ModuleGraphLayer},
     output::OutputAsset,
-    raw_module::RawModule,
     reference_type::{EcmaScriptModulesReferenceSubType, ReferenceType},
     resolve::ModulePart,
     virtual_output::VirtualOutputAsset,
@@ -335,21 +334,18 @@ async fn compute_subtree_content_hash(
     let hashes = modules
         .into_iter()
         .map(async |m| {
-            let ident = m.ident().to_string().await?;
+            let ident = m.ident();
+            let ident_value = ident.await?;
+            let ident_str = ident.to_string().await?;
             Ok(
-                if let Some(m) = ResolvedVc::try_downcast_type::<RawModule>(m) {
-                    let content_hash = m
-                        .source()
-                        .await?
-                        .with_context(|| format!("failed to get source for traced module {ident}"))?
-                        .content()
-                        .hash(HashAlgorithm::Xxh3Hash128Hex)
-                        .await?;
-                    // Traced module
-                    hash_xxh3_hash128((ident, content_hash))
-                } else if let Some(placeable_module) =
+                if let Some(placeable_module) =
                     ResolvedVc::try_downcast::<Box<dyn EcmascriptChunkPlaceable>>(m)
+                    && !ident_value
+                        .layer
+                        .as_ref()
+                        .is_some_and(|l| l.name() == "externals-tracing")
                 {
+                    // A bundled JS module
                     let chunk_item = placeable_module
                         .as_chunk_item(*module_graph, chunking_context)
                         .to_resolved()
@@ -363,12 +359,17 @@ async fn compute_subtree_content_hash(
                         None
                     };
                     let code = chunk_item.code(async_info).await?;
-                    hash_xxh3_hash128((ident, code.source_code()))
+                    hash_xxh3_hash128((ident_str, code.source_code()))
                 } else {
-                    bail!(
-                        "Failed to compute hash for module {ident}: not a RawModule or \
-                         ChunkableModule"
-                    );
+                    // A non-JS static file or an external module
+                    let content_hash = m
+                        .source()
+                        .await?
+                        .with_context(|| format!("failed to get source forwd  module {ident_str}"))?
+                        .content()
+                        .hash(HashAlgorithm::Xxh3Hash128Hex)
+                        .await?;
+                    hash_xxh3_hash128((ident_str, content_hash))
                 },
             )
         })
