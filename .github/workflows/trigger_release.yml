@@ -124,8 +124,6 @@ jobs:
 
       - run: pnpm install
 
-      - run: pnpm run build
-
       - run: node ./scripts/start-release.js --release-type "${INPUT_RELEASETYPE}" --semver-type "${INPUT_SEMVERTYPE}"
         env:
           RELEASE_GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
