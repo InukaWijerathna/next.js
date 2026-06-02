@@ -35,6 +35,10 @@ env:
   TURBO_VERSION: 2.8.11
   NODE_LTS_VERSION: 20
 
+permissions:
+  contents: write # for creating the release tag
+  id-token: write # for creating the GitHub App token
+
 jobs:
   start:
     if: github.repository_owner == 'vercel'
@@ -87,7 +91,7 @@ jobs:
           }
           EOF
         env:
-          RELEASE_GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          RELEASE_GITHUB_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ github.sha }}
 
      
