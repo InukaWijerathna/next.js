@@ -347,6 +347,20 @@ fn collect_safe_assignment_constant_ids(program: &Program) -> HashSet<Id> {
             }
         }
     }
+
+    // Drop any binding that later has an accessor attached to its object graph
+    // (e.g. `o.x = { set y(v) {} }`): a subsequent write through that property
+    // could invoke the accessor, so the binding is no longer safe to mutate.
+    for_each_top_level_assign(program, |assign| {
+        if assign.op == AssignOp::Assign
+            && let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left
+            && contains_getters_or_setters(&assign.right)
+            && let Some(root) = root_identifier(&member.obj)
+        {
+            ids.remove(&root.to_id());
+        }
+    });
+
     ids
 }
 
@@ -1012,13 +1026,11 @@ impl<'a> Visit for SideEffectVisitor<'a> {
                 // `module.exports`, `module.exports.x`) is the CJS equivalent of an
                 // ESM `export` declaration.
                 //
-                // An assigned value that carries an accessor is conservatively
-                // treated as a side effect: it would attach a getter/setter that a
-                // later member write (e.g. `module.exports.foo = 1`) could invoke.
-                if assign.op == AssignOp::Assign
-                    && self.assign_target_is_pure(&assign.left)
-                    && !contains_getters_or_setters(&assign.right)
-                {
+                // Accessor handling lives in the collection passes: a binding (or
+                // the exports object) that ever has a getter/setter attached to it
+                // is excluded up front, so `assign_target_is_pure` already returns
+                // false for member writes that could invoke one.
+                if assign.op == AssignOp::Assign && self.assign_target_is_pure(&assign.left) {
                     // Still check the assigned value, and the target's computed
                     // property keys (e.g. `exports[sideEffect()] = …`).
                     assign.left.visit_with(self);
@@ -2805,6 +2817,18 @@ mod tests {
         side_effects!(
             test_local_nested_setter_invoked,
             "const o = {}; o.a = { set y(v) { sideEffect() } }; o.a.y = 1;"
+        );
+        // Attaching an accessor to a safe `const` after its (accessor-free) init
+        // is conservatively a side effect, even without a write that invokes it.
+        side_effects!(
+            test_local_setter_attached_after_init,
+            "const o = {}; o.x = { set y(v) { sideEffect() } };"
+        );
+        // A setter installed via `Object.defineProperty` is caught because the
+        // call itself is a side effect (not a known-pure builtin).
+        side_effects!(
+            test_local_setter_via_define_property,
+            "const o = {}; Object.defineProperty(o, 'b', { set(x) { this.a = x / 2 } }); o.b = 4;"
         );
     }
 }
