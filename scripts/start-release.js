@@ -1,4 +1,5 @@
 // @ts-check
+const fs = require('fs')
 const path = require('path')
 const execa = require('execa')
 const resolveFrom = require('resolve-from')
@@ -63,35 +64,17 @@ async function main() {
     'release lookup'
   )
 
-  console.log(`Running pnpm release-${isCanary ? 'canary' : 'stable'}...`)
-  const preleaseType =
-    semverType === 'major'
-      ? 'premajor'
-      : semverType === 'minor'
-        ? 'preminor'
-        : 'prerelease'
-
-  const lernaArgs = [
-    'lerna',
-    'version',
-    isCanary || isReleaseCandidate || isBeta ? preleaseType : semverType,
-  ]
-
-  if (isCanary) {
-    lernaArgs.push('--preid', 'canary')
-  } else if (isReleaseCandidate) {
-    lernaArgs.push('--preid', 'rc')
-  } else if (isBeta) {
-    lernaArgs.push('--preid', 'beta')
-  }
-
-  lernaArgs.push('--force-publish', '-y', '--no-push')
-
-  const child = execa('pnpm', lernaArgs, {
+  // random change to make the commit not empty
+  fs.writeFileSync(
+    path.join(process.cwd(), '.version'),
+    `// This file was modified at ${new Date().toISOString()} to trigger a new release commit\n`
+  )
+  await execa('git', ['add', '.version'], {
     stdio: 'inherit',
   })
-
-  await child
+  await execa('git', ['commit', '-m', 'chore: create release commit'], {
+    stdio: 'inherit',
+  })
 
   await createGitHubReleaseCommit(githubToken)
 

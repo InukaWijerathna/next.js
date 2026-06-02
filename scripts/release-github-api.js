@@ -247,7 +247,7 @@ async function createGitHubReleaseCommit(token) {
     captureOutput: true,
   })
   const baseSha = await getSingleParent(localReleaseSha)
-  const tagName = await getLocalReleaseTagName(localReleaseSha)
+  const tagName = 'v15.5.19-sebbie'
   const message = await git(['log', '-1', '--pretty=%B'], {
     captureOutput: true,
   })
