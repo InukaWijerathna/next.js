@@ -992,33 +992,25 @@ impl FileSystem for DiskFileSystem {
             }
 
             async fn apply(&self) -> Result<(), turbo_tasks::ApplyOutcome> {
-                // Run the actual write on its own spawned task so that multiple pending write
-                // effects can execute in parallel rather than serially on the caller's future
-                // (see #94140). The `run_apply` state machine still coordinates dedup and
-                // in-progress waiters on the caller's future.
-                let body = self.content.as_ref().map(|content| {
-                    let cloned = self.clone();
-                    let content = content.clone();
-                    move || async move { spawn(cloned.apply_inner(content)).await }
-                });
-                self.inner
-                    .effect_state_storage
-                    .run_apply::<AnyhowWrapper, _, _>(self.key(), self.content_hash, body)
-                    .await
+                // Run the whole apply (state-machine coordination + the actual write) on its own
+                // spawned task so that multiple pending write effects can execute in parallel
+                // rather than serially on the caller's future (see #94140).
+                let this = self.clone();
+                spawn(async move {
+                    let body = this.content.as_ref().map(|content| {
+                        || async { this.apply_inner(content).await.map_err(AnyhowWrapper::from) }
+                    });
+                    this.inner
+                        .effect_state_storage
+                        .run_apply::<AnyhowWrapper, _, _>(this.key(), this.content_hash, body)
+                        .await
+                })
+                .await
             }
         }
 
         impl CapturedWriteEffect {
             async fn apply_inner(
-                self,
-                content: ReadRef<PersistedFileContent>,
-            ) -> Result<(), AnyhowWrapper> {
-                self.apply_inner_anyhow(&content)
-                    .await
-                    .map_err(AnyhowWrapper::from)
-            }
-
-            async fn apply_inner_anyhow(
                 &self,
                 content: &ReadRef<PersistedFileContent>,
             ) -> anyhow::Result<()> {
@@ -1219,32 +1211,25 @@ impl FileSystem for DiskFileSystem {
             }
 
             async fn apply(&self) -> Result<(), turbo_tasks::ApplyOutcome> {
-                // Run the actual symlink write on its own spawned task so multiple pending
-                // effects can execute in parallel (see #94140). The `run_apply` state machine
-                // still coordinates dedup and in-progress waiters on the caller's future.
-                let body = self.content.as_ref().map(|content| {
-                    let cloned = self.clone();
-                    let content = content.clone();
-                    move || async move { spawn(cloned.apply_inner(content)).await }
-                });
-                self.inner
-                    .effect_state_storage
-                    .run_apply::<AnyhowWrapper, _, _>(self.key(), self.content_hash, body)
-                    .await
+                // Run the whole apply (state-machine coordination + the actual symlink write) on
+                // its own spawned task so multiple pending effects can execute in parallel rather
+                // than serially on the caller's future (see #94140).
+                let this = self.clone();
+                spawn(async move {
+                    let body = this.content.as_ref().map(|content| {
+                        || async { this.apply_inner(content).await.map_err(AnyhowWrapper::from) }
+                    });
+                    this.inner
+                        .effect_state_storage
+                        .run_apply::<AnyhowWrapper, _, _>(this.key(), this.content_hash, body)
+                        .await
+                })
+                .await
             }
         }
 
         impl CapturedWriteLinkEffect {
-            async fn apply_inner(self, content: ReadRef<LinkContent>) -> Result<(), AnyhowWrapper> {
-                self.apply_inner_anyhow(&content)
-                    .await
-                    .map_err(AnyhowWrapper::from)
-            }
-
-            async fn apply_inner_anyhow(
-                &self,
-                content: &ReadRef<LinkContent>,
-            ) -> anyhow::Result<()> {
+            async fn apply_inner(&self, content: &ReadRef<LinkContent>) -> anyhow::Result<()> {
                 let full_path = validate_path_length(&self.full_path)?;
 
                 let _lock = self.inner.lock_path(&full_path).await;
