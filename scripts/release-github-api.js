@@ -219,35 +219,15 @@ async function createTreeFromLocalCommit({ token, baseSha, localReleaseSha }) {
 
 /**
  * Refresh local refs after the API writes so later release steps see the
- * GitHub-signed commit and tag instead of Lerna's unsigned local commit.
+ * GitHub-signed commit instead of Lerna's unsigned local commit.
  */
-async function alignLocalBranchWithGitHubReleaseCommit(
-  branch,
-  tagName,
-  commitSha
-) {
-  const tagExists = await execa(
-    'git',
-    ['show-ref', '--verify', '--quiet', `refs/tags/${tagName}`],
-    {
-      stdio: 'ignore',
-      reject: false,
-    }
-  )
-
-  if (tagExists.exitCode === 0) {
-    await git(['tag', '-d', tagName])
-  } else {
-    console.log(`Local tag ${tagName} does not exist; skipping delete`)
-  }
-
+async function alignLocalBranchWithGitHubReleaseCommit(branch) {
   await git([
     'fetch',
     'origin',
     `refs/heads/${branch}:refs/remotes/origin/${branch}`,
-    `refs/tags/${tagName}:refs/tags/${tagName}`,
   ])
-  await git(['reset', '--hard', commitSha])
+  await git(['reset', '--hard', `origin/${branch}`])
 }
 
 /**
@@ -298,43 +278,28 @@ async function createGitHubReleaseCommit(token) {
     )
   }
 
-  let createdTag = false
-
-  try {
-    await githubRequest(token, 'POST', `${REPO_API_PATH}/git/refs`, {
-      ref: `refs/tags/${tagName}`,
+  await githubRequest(
+    token,
+    'PATCH',
+    `${REPO_API_PATH}/git/refs/heads/${branch}`,
+    {
       sha: commit.sha,
-    })
-    createdTag = true
-
-    await githubRequest(
-      token,
-      'PATCH',
-      `${REPO_API_PATH}/git/refs/heads/${branch}`,
-      {
-        sha: commit.sha,
-        force: false,
-      }
-    )
-  } catch (error) {
-    if (createdTag) {
-      await githubRequest(
-        token,
-        'DELETE',
-        `${REPO_API_PATH}/git/refs/tags/${tagName}`
-      ).catch((deleteError) => {
-        console.error(`Failed to delete ${tagName} after release failure`)
-        console.error(deleteError)
-      })
+      force: false,
     }
+  )
 
-    throw error
-  }
+  await alignLocalBranchWithGitHubReleaseCommit(branch)
 
-  await alignLocalBranchWithGitHubReleaseCommit(branch, tagName, commit.sha)
+  // create an unsigned tag. Signings tags via GH API is broken on backport branches.
+  await execa('git', ['tag', '--force', tagName, commit.sha], {
+    stdio: 'inherit',
+  })
+  await execa('git', ['push', 'origin', `refs/tags/${tagName}`], {
+    stdio: 'inherit',
+  })
 
   console.log(
-    `Created GitHub-signed release commit ${commit.sha} and tag ${tagName}`
+    `Created GitHub-signed release commit ${commit.sha} and unsigned tag ${tagName}`
   )
 
   return {
