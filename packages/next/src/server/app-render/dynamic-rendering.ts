@@ -38,7 +38,7 @@ import {
   workUnitAsyncStorage,
 } from './work-unit-async-storage.external'
 import { workAsyncStorage } from '../app-render/work-async-storage.external'
-import { makeHangingPromise, getRuntimeStage } from '../dynamic-rendering-utils'
+import { makeHangingPromise } from '../dynamic-rendering-utils'
 import {
   METADATA_BOUNDARY_NAME,
   VIEWPORT_BOUNDARY_NAME,
@@ -556,25 +556,20 @@ export function createHangingInputAbortSignal(
       } else {
         // Otherwise we're in the final render and we should already have all
         // our caches filled.
-        // If the prerender uses stages, we have wait until the runtime stage,
-        // at which point all runtime inputs will be resolved.
-        // (otherwise, a runtime prerender might consider `cookies()` hanging
-        //  even though they'd resolve in the next task.)
+        // If the prerender uses stages, we have wait until the final stage.
+        // if an input didn't resolve at that point, then we can assume it never will.
         //
         // We might still be waiting on some microtasks so we
         // wait one tick before giving up. When we give up, we still want to
         // render the content of this cache as deeply as we can so that we can
         // suspend as deeply as possible in the tree or not at all if we don't
         // end up waiting for the input.
-        if (
-          // eslint-disable-next-line no-restricted-syntax -- We are discriminating between two different refined types and don't need an addition exhaustive switch here
-          workUnitStore.type === 'prerender-runtime' &&
-          workUnitStore.stagedRendering
-        ) {
-          const { stagedRendering } = workUnitStore
+        const { stagedRendering } = workUnitStore
+
+        if (stagedRendering && stagedRendering.finalStage !== null) {
           stagedRendering
-            .waitForStage(getRuntimeStage(stagedRendering))
-            .then(() => scheduleOnNextTick(() => controller.abort()))
+            .waitForStage(stagedRendering.finalStage)
+            .then(() => scheduleOnNextTick(() => controller.abort()), noop)
         } else {
           scheduleOnNextTick(() => controller.abort())
         }
@@ -595,6 +590,8 @@ export function createHangingInputAbortSignal(
       workUnitStore satisfies never
   }
 }
+
+function noop() {}
 
 export function annotateDynamicAccess(
   expression: string,

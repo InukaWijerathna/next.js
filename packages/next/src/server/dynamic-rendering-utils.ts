@@ -1,9 +1,9 @@
 import { InvariantError } from '../shared/lib/invariant-error'
 import {
+  isEarlyRenderStage,
   RenderStage,
   type AdvanceableRenderStage,
   type StagedRenderingController,
-  isEarlyRenderStage,
 } from './app-render/staged-rendering'
 import type { RequestStore } from './app-render/work-unit-async-storage.external'
 import { workUnitAsyncStorage } from './app-render/work-unit-async-storage.external'
@@ -107,21 +107,90 @@ export function makeDevtoolsIOAwarePromise<T>(
   })
 }
 
-/**
- * Returns the appropriate runtime stage for the current point in the render.
- * Runtime-prefetchable segments render in the early stages and should wait
- * for EarlyRuntime. Non-prefetchable segments render in the later stages
- * and should wait for Runtime.
- */
-export function getRuntimeStage(
+const DATA_STAGES_WITH_SHELL = {
+  // NOTE: Must be kept in sync with getSessionDataStage
+  sessionData: {
+    early: RenderStage.ShellEarlyRuntime as const,
+    late: RenderStage.ShellRuntime as const,
+  },
+  // NOTE: Must be kept in sync with getStaticLinkDataStage
+  staticLinkData: {
+    early: RenderStage.EarlyStatic as const,
+    late: RenderStage.Static as const,
+  },
+  // NOTE: Must be kept in sync with getRuntimeLinkDataStage
+  runtimeLinkData: {
+    early: RenderStage.EarlyRuntime as const,
+    late: RenderStage.Runtime as const,
+  },
+}
+
+const DATA_STAGES_WITHOUT_SHELLS = {
+  ...DATA_STAGES_WITH_SHELL,
+  // NOTE: Must be kept in sync with getSessionDataStage
+  sessionData: {
+    early: RenderStage.EarlyRuntime as const,
+    late: RenderStage.Runtime as const,
+  },
+}
+
+export function getStagesByDataKind(
   stagedRendering: StagedRenderingController
-): RenderStage.EarlyRuntime | RenderStage.Runtime {
+) {
+  return stagedRendering.hasShells
+    ? DATA_STAGES_WITH_SHELL
+    : DATA_STAGES_WITHOUT_SHELLS
+}
+
+export function getSessionDataStage(
+  stagedRendering: StagedRenderingController
+) {
   const { currentStage } = stagedRendering
   if (currentStage === RenderStage.Before) {
     throw new InvariantError(
       'Cannot determine late/early stage before starting the render'
     )
   }
+  // NOTE: keep in sync with getStagesByDataKind
+  if (stagedRendering.hasShells) {
+    // If we're rendering shells, then session data resolves in a shell runtime stage.
+    return isEarlyRenderStage(currentStage)
+      ? RenderStage.ShellEarlyRuntime
+      : RenderStage.ShellRuntime
+  } else {
+    return isEarlyRenderStage(currentStage)
+      ? RenderStage.EarlyRuntime
+      : RenderStage.Runtime
+  }
+}
+
+export function getStaticLinkDataStage(
+  stagedRendering: StagedRenderingController
+) {
+  const { currentStage } = stagedRendering
+  if (currentStage === RenderStage.Before) {
+    throw new InvariantError(
+      'Cannot determine late/early stage before starting the render'
+    )
+  }
+  // Link data never resolves in a shell stage.
+  // NOTE: keep in sync with getStagesByDataKind
+  return isEarlyRenderStage(currentStage)
+    ? RenderStage.EarlyStatic
+    : RenderStage.Static
+}
+
+export function getRuntimeLinkDataStage(
+  stagedRendering: StagedRenderingController
+) {
+  const { currentStage } = stagedRendering
+  if (currentStage === RenderStage.Before) {
+    throw new InvariantError(
+      'Cannot determine late/early stage before starting the render'
+    )
+  }
+  // Link data never resolves in a shell stage.
+  // NOTE: keep in sync with getStagesByDataKind
   return isEarlyRenderStage(currentStage)
     ? RenderStage.EarlyRuntime
     : RenderStage.Runtime

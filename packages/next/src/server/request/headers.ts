@@ -22,7 +22,7 @@ import { StaticGenBailoutError } from '../../client/components/static-generation
 import {
   makeDevtoolsIOAwarePromise,
   makeHangingPromise,
-  getRuntimeStage,
+  getRuntimeLinkDataStage,
 } from '../dynamic-rendering-utils'
 import { createDedupedByCallsiteServerErrorLoggerDev } from '../create-deduped-by-callsite-server-error-logger'
 import { isRequestAPICallableInsideAfter } from './utils'
@@ -135,8 +135,10 @@ export function headers(): Promise<ReadonlyHeaders> {
           const { stagedRendering } = workUnitStore
           if (stagedRendering) {
             // TODO(app-shells): headers should be dynamic instead.
+            // as a stopgap until we do that, consider it link data instead,
+            // which will at least omit it from the shell.
             return stagedRendering.delayUntilStage(
-              getRuntimeStage(stagedRendering),
+              getRuntimeLinkDataStage(stagedRendering),
               'headers',
               workUnitStore.headers
             )

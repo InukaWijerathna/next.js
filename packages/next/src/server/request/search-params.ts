@@ -28,6 +28,7 @@ import {
 } from '../app-render/work-unit-async-storage.external'
 import { InvariantError } from '../../shared/lib/invariant-error'
 import {
+  getStagesByDataKind,
   makeDevtoolsIOAwarePromise,
   makeHangingPromise,
 } from '../dynamic-rendering-utils'
@@ -144,7 +145,6 @@ export function createServerSearchParamsForServerPage(
       case 'prerender-runtime':
         return createRuntimePrerenderSearchParams(
           underlyingSearchParams,
-          workStore,
           workUnitStore,
           varyParamsAccumulator,
           isRuntimePrefetchable
@@ -242,23 +242,10 @@ function createStaticPrerenderSearchParams(
 
 function createRuntimePrerenderSearchParams(
   underlyingSearchParams: SearchParams,
-  workStore: WorkStore,
   workUnitStore: PrerenderStoreModernRuntime,
   varyParamsAccumulator: VaryParamsAccumulator | null,
   isRuntimePrefetchable: boolean
 ): Promise<SearchParams> {
-  if (workUnitStore.forceOmitParams) {
-    // App Shell prefetch: any `await searchParams` suspends. Segments that
-    // depend on search params render as holes, leaving the
-    // search-param-independent shell. Matches the behavior in
-    // createRuntimePrerenderParams for path params.
-    return makeHangingPromise<SearchParams>(
-      workUnitStore.renderSignal,
-      workStore.route,
-      '`searchParams`'
-    )
-  }
-
   const underlyingSearchParamsWithVarying =
     varyParamsAccumulator !== null
       ? createVaryingSearchParams(varyParamsAccumulator, underlyingSearchParams)
@@ -269,9 +256,10 @@ function createRuntimePrerenderSearchParams(
   if (!stagedRendering) {
     return result
   }
+  const searchParamsStage = getStagesByDataKind(stagedRendering).runtimeLinkData
   const stage = isRuntimePrefetchable
-    ? RenderStage.EarlyRuntime
-    : RenderStage.Runtime
+    ? searchParamsStage.early
+    : searchParamsStage.late
   return stagedRendering.waitForStage(stage).then(() => result)
 }
 
