@@ -19,11 +19,10 @@
 //! has side effects. This is safe for tree-shaking purposes as it prevents
 //! incorrectly removing code that might be needed, and can simply be improved over time.
 //!
-//! ## Future Enhancement: Local Variable Mutation Tracking
+//! ## Local Variable Mutation Tracking
 //!
-//! Currently, all assignments, updates, and property mutations are treated as side effects.
-//! However, mutations to locally-scoped variables that never escape the module evaluation scope
-//! could be considered side-effect free. This would handle common patterns like:
+//! Currently, assignments to local unaliased constants and `module.exports` are considered
+//! side-effect free. This handles the common pattern:
 //!
 //! ```javascript
 //! // Currently marked as having side effects, but could be pure:
@@ -33,9 +32,9 @@
 //! export default config;
 //! ```
 //!
-//! A special case to consider would be CJS exports `module.exports ={}` and `export.foo = ` could
-//! be considered non-effecful just like `ESM` exports.  If we do that we should also consider
-//! changing how `require` is handled, currently it is considered to be effectful
+//! All other assignments, updates, and property mutations are currently treated as side effects.
+//! In the future, it would be good to explore non-constant variables. However, this is more
+//! challenging as they can be aliased after being initialised.
 
 use std::collections::HashSet;
 
