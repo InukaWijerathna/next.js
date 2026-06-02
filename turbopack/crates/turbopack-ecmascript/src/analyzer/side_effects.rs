@@ -309,30 +309,46 @@ fn root_identifier(expr: &Expr) -> Option<&Ident> {
 ///
 /// Has side-effects.
 fn collect_safe_assignment_constant_ids(program: &Program) -> HashSet<Id> {
-    struct Collector {
-        ids: HashSet<Id>,
-    }
-    impl Visit for Collector {
-        noop_visit_type!();
-        fn visit_var_decl(&mut self, decl: &VarDecl) {
-            if decl.kind == VarDeclKind::Const {
-                for d in &decl.decls {
-                    if let (Pat::Ident(binding), Some(init)) = (&d.name, d.init.as_deref())
-                        && is_object_or_array_literal(init)
-                        && !contains_getters_or_setters(init)
-                    {
-                        self.ids.insert(binding.id.to_id());
-                    }
-                }
+    fn collect_from_var_decl(decl: &VarDecl, ids: &mut HashSet<Id>) {
+        if decl.kind != VarDeclKind::Const {
+            return;
+        }
+        for d in &decl.decls {
+            if let (Pat::Ident(binding), Some(init)) = (&d.name, d.init.as_deref())
+                && is_object_or_array_literal(init)
+                && !contains_getters_or_setters(init)
+            {
+                ids.insert(binding.id.to_id());
             }
-            decl.visit_children_with(self);
         }
     }
-    let mut collector = Collector {
-        ids: HashSet::new(),
-    };
-    program.visit_with(&mut collector);
-    collector.ids
+
+    let mut ids = HashSet::new();
+    match program {
+        Program::Module(module) => {
+            for item in &module.body {
+                match item {
+                    ModuleItem::Stmt(Stmt::Decl(Decl::Var(decl))) => {
+                        collect_from_var_decl(decl, &mut ids)
+                    }
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                        if let Decl::Var(decl) = &export.decl {
+                            collect_from_var_decl(decl, &mut ids)
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Program::Script(script) => {
+            for stmt in &script.body {
+                if let Stmt::Decl(Decl::Var(decl)) = stmt {
+                    collect_from_var_decl(decl, &mut ids)
+                }
+            }
+        }
+    }
+    ids
 }
 
 /// Whether `expr`'s object graph contains a getter or setter. An accessor makes
