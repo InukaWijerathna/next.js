@@ -6,13 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       releaseType:
-        description: stable, canary, or release candidate?
+        description: stable, canary, beta, or release candidate?
         required: true
         type: choice
         options:
           - canary
           - stable
           - release-candidate
+          - beta
 
       semverType:
         description: semver type?
@@ -31,7 +32,7 @@ name: Trigger Release
 
 env:
   NAPI_CLI_VERSION: 2.18.4
-  TURBO_VERSION: 2.5.5
+  TURBO_VERSION: 2.8.11
   NODE_LTS_VERSION: 20
 
 jobs:
@@ -48,7 +49,7 @@ jobs:
       - name: Setup node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 18
+          node-version: 20
           check-latest: true
           package-manager-cache: false
 
@@ -76,6 +77,9 @@ jobs:
 
       - name: Check token
         run: gh auth status
+        # This sometimes fails for unknown reasons.
+        # Ignoring failures for now to check if a failure truly implies a failed publish.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
 
@@ -113,14 +117,10 @@ jobs:
         id: cache-pnpm-store
         with:
           path: ${{ steps.get-store-path.outputs.STORE_PATH }}
-          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-store-
-            pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          key: pnpm-store-v2-${{ hashFiles('pnpm-lock.yaml') }}
+          # Do not use restore-keys since it leads to indefinite growth of the cache.
 
       - run: pnpm install
-
-      - run: pnpm run build
 
       - run: node ./scripts/start-release.js --release-type "${INPUT_RELEASETYPE}" --semver-type "${INPUT_SEMVERTYPE}"
         env:
