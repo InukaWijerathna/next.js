@@ -76,6 +76,7 @@ export function createServerPathnameForMetadata(
         }
       }
       case 'request':
+        // TODO(restart-on-cache-miss): this should be delayed in if there's non-static params
         return createRenderPathname(underlyingPathname)
       default:
         workUnitStore satisfies never
