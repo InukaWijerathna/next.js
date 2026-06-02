@@ -33,13 +33,6 @@ function getGitUser() {
 
 async function configureGitHubAuth(token) {
   const gitUser = getGitUser()
-  const remoteUrl = `https://x-access-token:${encodeURIComponent(
-    token
-  )}@${REPO_URL}`
-
-  await execa('git', ['remote', 'set-url', 'origin', remoteUrl], {
-    stdio: 'inherit',
-  })
   await execa('git', ['config', 'user.name', gitUser.name], {
     stdio: 'inherit',
   })

@@ -72,14 +72,16 @@ jobs:
           GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
 
       - name: Clone Next.js repository
-        # We expect to find the latest tag on this branch in the last 1000 commits.
-        run: git clone https://github.com/vercel/next.js.git --depth=1000 --single-branch --branch ${GITHUB_REF_NAME:-canary} .
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # We expect to find the latest tag on this branch in the last 1000 commits.
+          fetch-depth: 1000
+          fetch-tags: true
+          persist-credentials: true
+          token: ${{ steps.release-app-token.outputs.token }}
 
       - name: Check token
         run: gh auth status
-        # This sometimes fails for unknown reasons.
-        # Ignoring failures for now to check if a failure truly implies a failed publish.
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
 
