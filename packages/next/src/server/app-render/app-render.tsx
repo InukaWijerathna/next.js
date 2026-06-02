@@ -7814,6 +7814,16 @@ async function prerenderToStream(
         }
       )
 
+      // If a sync IO error occurred, there's no point continuing.
+      // NOTE this is load-bearing. The way we simulate a halt
+      // in a render (ignoring all chunks emitted after an abort)
+      // can lead to a blocked root chunk (if it didn't flush before an abort).
+      // This means that deserializing the RSC payload can hang in unexpected places --
+      // normally, we can at least get the outer object with hanging promises inside.
+      if (serverDynamicTracking.syncDynamicErrorWithStack) {
+        throw serverDynamicTracking.syncDynamicErrorWithStack
+      }
+
       const reactServerResult = (reactServerPrerenderResult =
         new ReactServerPrerenderResult(collectedChunks.prerenderChunks))
       reactServerPrerenderResultIsDynamic = serverIsDynamic
