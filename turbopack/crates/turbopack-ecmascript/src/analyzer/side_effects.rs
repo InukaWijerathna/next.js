@@ -622,8 +622,10 @@ impl<'a> SideEffectVisitor<'a> {
         }
         // A member mutation rooted at a `const` bound to an unaliased object/array
         // literal is also unobservable during evaluation.
-        matches!(root_identifier(&member.obj), Some(root)
-            if self.safe_assignment_constant_ids.contains(&root.to_id()))
+        let Some(root) = root_identifier(&member.obj) else {
+            return false;
+        };
+        self.safe_assignment_constant_ids.contains(&root.to_id())
     }
 
     /// Check if an expression is a known pure built-in function.
