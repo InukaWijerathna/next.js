@@ -71,63 +71,23 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
 
-      - name: Clone Next.js repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          # We expect to find the latest tag on this branch in the last 1000 commits.
-          fetch-depth: 1000
-          fetch-tags: true
-          persist-credentials: true
-          token: ${{ steps.release-app-token.outputs.token }}
-
-      - name: Check token
-        run: gh auth status
-        env:
-          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
-
-      - name: Get commit of the latest tag
+      - name: Create hardcoded release tag
         run: |
-          latest_tag="$(git describe --tags --abbrev=0)"
-          echo "LATEST_TAG_COMMIT=$(git rev-list -n 1 "$latest_tag")" >> $GITHUB_ENV
-
-      - name: Get latest commit
-        run: echo "LATEST_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
-
-      - name: Check if new commits since last tag
-        if: ${{ github.event.inputs.releaseType != 'stable' && github.event.inputs.force != true }}
-        run: |
-          if [ "$LATEST_TAG_COMMIT" = "$LATEST_COMMIT" ]; then
-            echo "No new commits. Exiting..."
-            exit 1
-          fi
-
-      # https://github.com/actions/virtual-environments/issues/1187
-      - name: tune linux network
-        run: sudo ethtool -K eth0 tx off rx off
-
-      - name: Setup corepack
-        run: |
-          npm i -g corepack@0.31
-          corepack enable
-          pnpm --version
-
-      - id: get-store-path
-        run: echo STORE_PATH=$(pnpm store path) >> $GITHUB_OUTPUT
-
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        timeout-minutes: 5
-        id: cache-pnpm-store
-        with:
-          path: ${{ steps.get-store-path.outputs.STORE_PATH }}
-          key: pnpm-store-v2-${{ hashFiles('pnpm-lock.yaml') }}
-          # Do not use restore-keys since it leads to indefinite growth of the cache.
-
-      - run: pnpm install
-
-      - run: node ./scripts/start-release.js --release-type "${INPUT_RELEASETYPE}" --semver-type "${INPUT_SEMVERTYPE}"
+          curl --fail-with-body --include -L \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${RELEASE_GITHUB_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/vercel/next.js/git/refs" \
+            -d @- <<EOF
+          {
+            "ref": "refs/tags/v16.2.8",
+            "sha": "${RELEASE_SHA}"
+          }
+          EOF
         env:
           RELEASE_GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
-          RELEASE_GITHUB_APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
-          RELEASE_GITHUB_APP_USER_ID: ${{ steps.release-app-user.outputs.user-id }}
-          INPUT_RELEASETYPE: ${{ github.event.inputs.releaseType || 'canary' }}
-          INPUT_SEMVERTYPE: ${{ github.event.inputs.semverType }}
+          RELEASE_SHA: ${{ github.sha }}
+
+     
