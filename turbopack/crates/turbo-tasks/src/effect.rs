@@ -3,11 +3,11 @@ use std::{
     error::Error as StdError,
     future::Future,
     mem::{forget, replace},
-    pin::Pin,
     sync::Arc,
 };
 
 use anyhow::Result;
+use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::{Mutex, MutexGuard};
 use rustc_hash::FxHashMap;
@@ -15,7 +15,7 @@ use tracing::Instrument;
 
 use crate::{
     self as turbo_tasks, CollectiblesSource, NonLocalValue, OperationVc, ReadRef, ResolvedVc,
-    TryJoinIterExt, VcRead, VcValueType, emit,
+    TryJoinIterExt, UpcastStrict, VcDefaultRead, VcRead, VcValueType, emit,
     event::Event,
     invalidation::{Invalidator, get_invalidator},
     manager::{
@@ -27,23 +27,15 @@ use crate::{
 
 const APPLY_EFFECTS_CONCURRENCY_LIMIT: usize = 1024;
 
-/// Emit-time effect. Lives inside an [`EffectInstance`] cell and is allowed to read Vcs in
-/// [`Effect::capture`] (since `capture` runs from within a turbo-tasks task during
-/// [`take_effects`]).
-///
-/// Implementations should defer reading any `ResolvedVc`/`Vc` data they need until `capture()` and
-/// return a [`CapturedEffect`] holding the results. The captured value is what
-/// gets stored in [`Effects`] and what eventually drives the side effect at apply time. This allows
-/// us to drop data at and appropriate time.
-pub trait Effect: TraceRawVcs + NonLocalValue + Send + Sync + 'static {
-    /// The pre-resolved companion that performs the side effect. See [`CapturedEffect`].
-    type Captured: CapturedEffect;
-
-    /// Read any Vc data needed for `apply()`.
+/// An IO Side effect to be computed by turbo tasks and then executed outside of turbo tasks.
+#[async_trait]
+#[turbo_tasks::value_trait]
+pub trait Effect {
+    /// Read any Vc data needed for `apply()` and return the [`CapturedEffect`] that performs it.
     ///
     /// An implementation may elect to elide capturing data if the `EffectStateStorage` state is
     /// already up to date.
-    fn capture(&self) -> impl Future<Output = Result<Self::Captured>> + Send;
+    async fn capture(&self) -> Result<Box<dyn CapturedEffect>>;
 }
 
 /// Post-capture effect. Holds data needed to perform the actual side effect in a top level context.
@@ -51,10 +43,7 @@ pub trait Effect: TraceRawVcs + NonLocalValue + Send + Sync + 'static {
 /// `apply()` is responsible for coordinating with [`EffectStateStorage`] via
 /// [`EffectStateStorage::run_apply`] (which handles the per-key state machine, in-progress
 /// coordination, dedup-hit short-circuit, and panic recovery).
-///
-/// If an implementation elected to not read cells in in [`Effect::capture`] because the
-/// storage state already held a matching `Applied { value_hash }`.  And due to racing changes that
-/// is no longer true by the time `apply` is called they must return [`ApplyOutcome::Retry`].
+#[async_trait]
 pub trait CapturedEffect: TraceRawVcs + NonLocalValue + Send + Sync + 'static {
     /// Unique key identifying this effect's target (e.g., absolute path bytes).
     fn key(&self) -> Box<[u8]>;
@@ -65,7 +54,7 @@ pub trait CapturedEffect: TraceRawVcs + NonLocalValue + Send + Sync + 'static {
     /// Perform the side effect
     ///
     /// Implementations typically dispatch into [`EffectStateStorage::run_apply`].
-    fn apply(&self) -> impl Future<Output = Result<(), ApplyOutcome>> + Send;
+    async fn apply(&self) -> Result<(), ApplyOutcome>;
 }
 
 /// Outcome of [`CapturedEffect::apply`]. Distinguishes a side-effect failure (terminal) from a
@@ -252,79 +241,6 @@ impl EffectStateStorage {
     }
 }
 
-// Private dyn-dispatch wrapper for emit-time `Effect`. Held inside `EffectInstance` cells.
-// Provides only `dyn_capture` — Vc-reading capture step that runs during `take_effects`.
-trait DynEffect: TraceRawVcs + NonLocalValue + Send + Sync + 'static {
-    fn dyn_capture<'a>(&'a self) -> DynCaptureFuture<'a>;
-}
-
-type DynCaptureFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Box<dyn DynCapturedEffect>>> + Send + 'a>>;
-
-impl<T> DynEffect for T
-where
-    T: Effect,
-{
-    fn dyn_capture<'a>(&'a self) -> DynCaptureFuture<'a> {
-        Box::pin(async move {
-            let captured = Effect::capture(self).await?;
-            Ok(Box::new(captured) as Box<dyn DynCapturedEffect>)
-        })
-    }
-}
-
-// Private dyn-dispatch wrapper for post-capture `CapturedEffect`. Held inside `Effects.captured`
-// (Vec drops on successful apply). No Vc reads. Mirrors the dynosaur pattern of
-// https://github.com/spastorino/dynosaur.
-trait DynCapturedEffect: TraceRawVcs + NonLocalValue + Send + Sync + 'static {
-    fn key(&self) -> Box<[u8]>;
-    fn value_hash(&self) -> u128;
-    fn dyn_apply<'a>(&'a self) -> DynEffectApplyFuture<'a>;
-}
-
-impl<T> DynCapturedEffect for T
-where
-    T: CapturedEffect,
-{
-    fn key(&self) -> Box<[u8]> {
-        CapturedEffect::key(self)
-    }
-
-    fn value_hash(&self) -> u128 {
-        CapturedEffect::value_hash(self)
-    }
-
-    fn dyn_apply<'a>(&'a self) -> DynEffectApplyFuture<'a> {
-        Box::pin(async move { CapturedEffect::apply(self).await })
-    }
-}
-
-type DynEffectApplyFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ApplyOutcome>> + Send + 'a>>;
-
-/// A trait to emit a task effect as collectible. This trait only has one implementation,
-/// `EffectInstance` and no other implementation is allowed. The trait is private to this module so
-/// that no other implementation can be added.
-#[turbo_tasks::value_trait]
-trait EffectCollectible {}
-
-/// The Effect instance collectible that is emitted for effects.
-#[turbo_tasks::value(serialization = "skip", cell = "new", eq = "manual")]
-struct EffectInstance {
-    #[turbo_tasks(debug_ignore)]
-    inner: Box<dyn DynEffect>,
-}
-
-impl EffectInstance {
-    fn new(effect: impl Effect) -> Self {
-        Self {
-            inner: Box::new(effect) as _,
-        }
-    }
-}
-
-#[turbo_tasks::value_impl]
-impl EffectCollectible for EffectInstance {}
-
 /// Emits an effect to be applied. The effect is executed once [`Effects::apply`] is called (see
 /// [`take_effects`]).
 ///
@@ -334,10 +250,16 @@ impl EffectCollectible for EffectInstance {}
 /// Effects are executed in parallel, so they might need to use async locking to avoid problems.
 /// Order of execution of multiple effects is not defined. You must not use multiple conflicting
 /// effects to avoid non-deterministic behavior.
-pub fn emit_effect(effect: impl Effect) {
-    emit::<Box<dyn EffectCollectible>>(ResolvedVc::upcast(
-        EffectInstance::new(effect).resolved_cell(),
-    ));
+///
+/// The concrete `effect` is celled and emitted as a `Box<dyn Effect>` collectible. Because each
+/// concrete `Effect` is a serializable [`macro@turbo_tasks::value`] cell, the collectible persists
+/// in the backing store and is restored on a warm cache start without re-running the producer.
+pub fn emit_effect<T>(effect: T)
+where
+    T: Effect + VcValueType<Read = VcDefaultRead<T>> + UpcastStrict<Box<dyn Effect>>,
+{
+    let cell = ResolvedVc::<T>::cell_private(effect);
+    emit::<Box<dyn Effect>>(ResolvedVc::upcast(cell));
 }
 
 /// Capture effects. Call this from within a [turbo-tasks operation][crate::OperationVc].
@@ -393,29 +315,23 @@ pub fn emit_effect(effect: impl Effect) {
 /// ```
 pub async fn take_effects(source: impl CollectiblesSource) -> Result<Effects> {
     debug_assert_not_in_top_level_task("take_effects");
-    let effect_refs = source
-        .take_collectibles::<Box<dyn EffectCollectible>>()
+    // Collect the emitted `Box<dyn Effect>` collectibles directly. Each is a serializable cell
+    // (so the collectible edge persists/restores via its `CellId.type_id`).
+    let effect_vcs: Vec<ResolvedVc<Box<dyn Effect>>> = source
+        .take_collectibles::<Box<dyn Effect>>()
         .into_iter()
-        .map(|effect| {
-            if let Some(effect) = ResolvedVc::try_downcast_type::<EffectInstance>(effect) {
-                effect
-            } else {
-                unreachable!("EffectCollectible must only be implemented by EffectInstance");
-            }
-        })
-        .try_join()
-        .await?;
+        .collect();
 
     // Capture step: resolve any Vc reads now while we're still inside the producing task's
-    // context. The `ReadRef<EffectInstance>`s drop at the end of this iteration, so the only
-    // long-lived strong counts onto `EffectInstance` cells come from `dyn_capture` borrows
-    // (transient).
-    let captured: Vec<Box<dyn DynCapturedEffect>> = effect_refs
+    // context. We read each effect as a `TraitRef` and call its plain `capture()`. The captured
+    // `Box<dyn CapturedEffect>` holds whatever heavy data (e.g. `ReadRef<…>`) the side effect
+    // needs; the lightweight emit-side `Effect` cells are free to be evicted afterwards.
+    let captured: Vec<Box<dyn CapturedEffect>> = effect_vcs
         .iter()
-        .map(|effect_ref| effect_ref.inner.dyn_capture())
+        .map(|effect_vc| async move { effect_vc.into_trait_ref().await?.capture().await })
         .try_join()
         .await?;
-    drop(effect_refs);
+    drop(effect_vcs);
 
     // Eager per-key conflict detection. This only inspects the captured effects themselves
     // (their `key()` and `value_hash()`), so it is safe to run inside the producing task.
@@ -480,10 +396,10 @@ impl From<Arc<dyn EffectError>> for EffectsError {
 /// the apply-side state machine in [`EffectStateStorage::run_apply`] handles per-key hash dedup.
 type UniqueKeys = Result<Vec<usize>, Arc<ConflictingEffectError>>;
 
-/// Slice of captured effects, individually Arc'd. Each effect is `Arc<dyn DynCapturedEffect>`
+/// Slice of captured effects, individually Arc'd. Each effect is `Arc<dyn CapturedEffect>`
 /// so callers can cheaply clone a Send handle out across `.await` boundaries without holding
 /// the outer mutex.
-type CapturedSlice = Arc<[Arc<dyn DynCapturedEffect>]>;
+type CapturedSlice = Arc<[Arc<dyn CapturedEffect>]>;
 
 /// Captured effects from an operation. This struct can be used to return Effects from a turbo-tasks
 /// function and apply them later.
@@ -509,8 +425,8 @@ pub struct Effects {
     /// Captured at `take_effects` time. `None` for `Effects::empty()` (nothing to retry).
     #[turbo_tasks(debug_ignore, trace_ignore)]
     invalidator: Option<Invalidator>,
-    /// Unique key info computed eagerly in `take_effects`. Holds the dedup'd `(idx, value_hash)`
-    /// per unique key, or a `ConflictingEffectError` if two captured effects share a key with
+    /// Unique key info computed eagerly in `take_effects`. Holds one index into `captured` per
+    /// unique key, or a `ConflictingEffectError` if two captured effects share a key with
     /// different hashes. No [`EffectStateStorage`] interaction here — that is deferred to
     /// `apply()`.
     #[turbo_tasks(debug_ignore, trace_ignore)]
@@ -541,14 +457,14 @@ impl Effects {
     }
 
     fn new(
-        captured: Vec<Box<dyn DynCapturedEffect>>,
+        captured: Vec<Box<dyn CapturedEffect>>,
         unique_keys: UniqueKeys,
         invalidator: Invalidator,
     ) -> Self {
         // Convert Box<dyn> into Arc<dyn> per slot. Each Arc is independently Send/Sync.
         let captured: CapturedSlice = captured
             .into_iter()
-            .map(Arc::<dyn DynCapturedEffect>::from)
+            .map(Arc::<dyn CapturedEffect>::from)
             .collect();
         Self {
             captured,
@@ -609,7 +525,7 @@ impl Effects {
                 .map(Ok::<_, EffectsError>)
                 .try_for_each_concurrent(
                     APPLY_EFFECTS_CONCURRENCY_LIMIT,
-                    async |idx| match captured[*idx].dyn_apply().await {
+                    async |idx| match captured[*idx].apply().await {
                         Ok(()) => Ok(()),
                         Err(ApplyOutcome::Failed(err)) => Err(EffectsError::Apply(err)),
                         Err(ApplyOutcome::Retry) => {
@@ -765,11 +681,11 @@ fn handle_apply_retry(err: EffectsError, attempts: &mut usize) -> Result<()> {
     }
 }
 
-/// Build deduped `(idx, value_hash)` info from the captured slice. Detects per-key value-hash
+/// Build the deduped per-key indices into the captured slice. Detects per-key value-hash
 /// conflicts. This is the eager half of effect deduplication — it inspects only the captured
 /// effects themselves (no [`EffectStateStorage`] interaction) and is therefore safe to call
 /// from inside a turbo-tasks task in [`take_effects`].
-fn build_unique_keys(captured: &[Box<dyn DynCapturedEffect>]) -> UniqueKeys {
+fn build_unique_keys(captured: &[Box<dyn CapturedEffect>]) -> UniqueKeys {
     let mut by_key: FxHashMap<Box<[u8]>, usize> = FxHashMap::default();
     for (idx, effect) in captured.iter().enumerate() {
         match by_key.entry(effect.key()) {

@@ -14,6 +14,7 @@ use std::sync::{
 };
 
 use anyhow::Result;
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use turbo_rcstr::{RcStr, rcstr};
@@ -72,17 +73,21 @@ impl SharedState {
         self.captures_with_content.load(Ordering::Relaxed)
     }
 }
-#[derive(TraceRawVcs, NonLocalValue)]
+// Emit-side effect. A `#[turbo_tasks::value]` cell implementing the `Effect` value_trait. Marked
+// `serialization = "skip"` because it holds `Arc<SharedState>` (counters + storage, not
+// serializable) — these tests use `noop_backing_storage`, so persistence isn't exercised.
+#[turbo_tasks::value(serialization = "skip", cell = "new", eq = "manual")]
 struct TestEffect {
     key: RcStr,
     value_hash: u128,
+    #[turbo_tasks(trace_ignore, debug_ignore)]
     shared: Arc<SharedState>,
 }
 
+#[async_trait]
+#[turbo_tasks::value_impl]
 impl Effect for TestEffect {
-    type Captured = TestEffectCaptured;
-
-    async fn capture(&self) -> Result<TestEffectCaptured> {
+    async fn capture(&self) -> Result<Box<dyn CapturedEffect>> {
         // Consult storage. If the per-key state already records `Applied { value_hash }`
         // matching our hash, elide content materialization (`content = false`). Otherwise
         // bump the captures-with-content counter (the test's stand-in for a `ReadRef` /
@@ -99,15 +104,16 @@ impl Effect for TestEffect {
                 .fetch_add(1, Ordering::Relaxed);
             true
         };
-        Ok(TestEffectCaptured {
+        Ok(Box::new(TestEffectCaptured {
             key: self.key.clone(),
             value_hash: self.value_hash,
             content,
             shared: self.shared.clone(),
-        })
+        }) as Box<dyn CapturedEffect>)
     }
 }
 
+// Post-capture effect — session-only plain struct.
 #[derive(TraceRawVcs, NonLocalValue)]
 struct TestEffectCaptured {
     key: RcStr,
@@ -118,6 +124,7 @@ struct TestEffectCaptured {
     shared: Arc<SharedState>,
 }
 
+#[async_trait]
 impl CapturedEffect for TestEffectCaptured {
     fn key(&self) -> Box<[u8]> {
         self.key.as_bytes().into()

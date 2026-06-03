@@ -65,6 +65,7 @@ turbo-tasks-malloc = { workspace = true, default-features = false }
 thread_local = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio"] }
 futures = { workspace = true }
 indoc = { workspace = true }

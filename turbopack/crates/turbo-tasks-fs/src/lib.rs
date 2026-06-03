@@ -46,6 +46,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use async_trait::async_trait;
 use auto_hash_map::{AutoMap, AutoSet};
 use bincode::{Decode, Encode};
 use bitflags::bitflags;
@@ -917,17 +918,21 @@ impl FileSystem for DiskFileSystem {
     }
 
     #[turbo_tasks::function(fs)]
-    async fn write(&self, fs_path: FileSystemPath, content: ResolvedVc<FileContent>) -> Result<()> {
+    async fn write(
+        self: ResolvedVc<Self>,
+        fs_path: FileSystemPath,
+        content: ResolvedVc<FileContent>,
+    ) -> Result<()> {
+        let this = self.await?;
         // You might be tempted to use `session_dependent` here, but `write` purely declares a side
         // effect and does not need to be reexecuted in the next session. All side effects are
         // reexecuted in general.
 
         // Check if path is denied - if so, return an error
-        if self.inner.is_path_denied(&fs_path) {
+        if this.inner.is_path_denied(&fs_path) {
             turbobail!("Cannot write to denied path: {fs_path}");
         }
-        let full_path = self.to_sys_path(&fs_path);
-        let inner = self.inner.clone();
+        let full_path = this.to_sys_path(&fs_path);
 
         // Persist the file content so it is stored in the persistent cache.
         // Since FileContent uses serialization = "hash", persisting it here ensures the full
@@ -937,18 +942,22 @@ impl FileSystem for DiskFileSystem {
         let content = content.persist().to_resolved().await?;
         let content_hash = u128::from_le_bytes(hash_xxh3_hash128(&*content.await?));
 
-        #[derive(TraceRawVcs, NonLocalValue, Clone)]
+        #[turbo_tasks::value(eq = "manual", cell = "new")]
         struct WriteEffect {
             full_path: Arc<PathBuf>,
-            inner: Arc<DiskFileSystemInner>,
+            fs: ResolvedVc<DiskFileSystem>,
             content: ResolvedVc<PersistedFileContent>,
             content_hash: u128,
         }
 
+        #[async_trait]
+        #[turbo_tasks::value_impl]
         impl Effect for WriteEffect {
-            type Captured = CapturedWriteEffect;
+            async fn capture(&self) -> Result<Box<dyn CapturedEffect>> {
+                // Untracked, a tracked read of this cell occurred in the write effect so if it
+                // somehow changes the effect will be re-emitted
+                let inner = (*self.fs).untracked().await?.inner.clone();
 
-            async fn capture(&self) -> Result<CapturedWriteEffect> {
                 // If the per-key effect state already records `Applied { value_hash }` matching
                 // our hash, skip materializing the content (avoids a possible disk read +
                 // decompression via the persistent cache). The apply-time state machine will
@@ -956,21 +965,23 @@ impl FileSystem for DiskFileSystem {
                 // apply, `Effects::apply` will fire our producer's invalidator via the Retry
                 // pathway and the producer will rerun with a fresh capture.
                 let key_bytes: Box<[u8]> = self.full_path.as_os_str().as_encoded_bytes().into();
-                let content = if self
-                    .inner
+                let content = if inner
                     .effect_state_storage
                     .matches_applied(&key_bytes, self.content_hash)
                 {
                     None
                 } else {
-                    Some(self.content.await?)
+                    // Untracked: the content cell is already captured via `content_hash`, and
+                    // we don't want this `capture` to take a tracked dependency on the content
+                    // cell — that would pin it and defeat the eviction this refactor enables.
+                    Some((*self.content).untracked().await?)
                 };
-                Ok(CapturedWriteEffect {
+                Ok(Box::new(CapturedWriteEffect {
                     full_path: self.full_path.clone(),
-                    inner: self.inner.clone(),
+                    inner,
                     content,
                     content_hash: self.content_hash,
-                })
+                }) as Box<dyn CapturedEffect>)
             }
         }
 
@@ -982,6 +993,7 @@ impl FileSystem for DiskFileSystem {
             content_hash: u128,
         }
 
+        #[async_trait]
         impl CapturedEffect for CapturedWriteEffect {
             fn key(&self) -> Box<[u8]> {
                 self.full_path.as_os_str().as_encoded_bytes().into()
@@ -1133,7 +1145,7 @@ impl FileSystem for DiskFileSystem {
 
         emit_effect(WriteEffect {
             full_path: Arc::new(full_path),
-            inner,
+            fs: self,
             content,
             content_hash,
         });
@@ -1143,7 +1155,7 @@ impl FileSystem for DiskFileSystem {
 
     #[turbo_tasks::function(fs)]
     async fn write_link(
-        &self,
+        self: ResolvedVc<Self>,
         fs_path: FileSystemPath,
         target: ResolvedVc<LinkContent>,
     ) -> Result<()> {
@@ -1151,48 +1163,51 @@ impl FileSystem for DiskFileSystem {
         // effect and does not need to be re-executed in the next session. All side effects are
         // re-executed in general.
 
+        let this = self.await?;
         // Check if path is denied - if so, return an error
-        if self.inner.is_path_denied(&fs_path) {
+        if this.inner.is_path_denied(&fs_path) {
             turbobail!("Cannot write link to denied path: {fs_path}");
         }
-        let full_path = self.to_sys_path(&fs_path);
-        let inner = self.inner.clone();
+        let full_path = this.to_sys_path(&fs_path);
 
         let content_hash = u128::from_le_bytes(hash_xxh3_hash128(&*target.await?));
 
-        #[derive(TraceRawVcs, NonLocalValue)]
+        #[turbo_tasks::value(eq = "manual", cell = "new")]
         struct WriteLinkEffect {
             full_path: Arc<PathBuf>,
-            inner: Arc<DiskFileSystemInner>,
+            fs: ResolvedVc<DiskFileSystem>,
             target: ResolvedVc<LinkContent>,
             content_hash: u128,
         }
 
+        #[async_trait]
+        #[turbo_tasks::value_impl]
         impl Effect for WriteLinkEffect {
-            type Captured = CapturedWriteLinkEffect;
+            async fn capture(&self) -> Result<Box<dyn CapturedEffect>> {
+                let inner = (*self.fs).untracked().await?.inner.clone();
 
-            async fn capture(&self) -> Result<CapturedWriteLinkEffect> {
                 // Skip target materialization if the per-key effect state already records
                 // `Applied { value_hash }` matching our hash. See `WriteEffect::capture`.
                 let key_bytes: Box<[u8]> = self.full_path.as_os_str().as_encoded_bytes().into();
-                let content = if self
-                    .inner
+                let content = if inner
                     .effect_state_storage
                     .matches_applied(&key_bytes, self.content_hash)
                 {
                     None
                 } else {
-                    Some(self.target.await?)
+                    // Untracked — see `WriteEffect::capture`.
+                    Some((*self.target).untracked().await?)
                 };
-                Ok(CapturedWriteLinkEffect {
+                Ok(Box::new(CapturedWriteLinkEffect {
                     full_path: self.full_path.clone(),
-                    inner: self.inner.clone(),
+                    inner,
                     content,
                     content_hash: self.content_hash,
-                })
+                }) as Box<dyn CapturedEffect>)
             }
         }
 
+        // Post-capture effect — session-only plain struct.
         #[derive(TraceRawVcs, NonLocalValue, Clone)]
         struct CapturedWriteLinkEffect {
             full_path: Arc<PathBuf>,
@@ -1201,6 +1216,7 @@ impl FileSystem for DiskFileSystem {
             content_hash: u128,
         }
 
+        #[async_trait]
         impl CapturedEffect for CapturedWriteLinkEffect {
             fn key(&self) -> Box<[u8]> {
                 self.full_path.as_os_str().as_encoded_bytes().into()
@@ -1456,7 +1472,7 @@ impl FileSystem for DiskFileSystem {
 
         emit_effect(WriteLinkEffect {
             full_path: Arc::new(full_path),
-            inner,
+            fs: self,
             target,
             content_hash,
         });
